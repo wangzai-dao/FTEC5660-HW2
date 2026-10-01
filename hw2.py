@@ -11,6 +11,9 @@ import math
 import re
 from pathlib import Path
 from typing import Any
+from langchain_deepseek import ChatDeepSeek
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 
 MCP_URL = "https://ftec5660.ngrok.app/mcp"
@@ -74,17 +77,82 @@ def build_agent(tools: list[Any]) -> Any:
     ``tools`` are the six SocialGraph MCP tools (Facebook + LinkedIn search and
     profile lookup), already wrapped as LangChain tools. You may add your own
     local tools as well.
-
-    Suggested imports:
-        from langchain_deepseek import ChatDeepSeek
-        from langchain.agents import create_agent
-
-    Use the DeepSeek model named by ``MODEL_NAME``. The API key is loaded
-    from .env.
     """
-    ### YOUR CODE HERE
-    _ = tools
-    return None
+    model = ChatDeepSeek(
+        model=MODEL_NAME,
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        temperature=0,
+        timeout=120,
+        max_retries=2,
+    )
+
+    system_prompt = """You are a meticulous CV verification agent. Your job is to verify the claims in a candidate's CV against their LinkedIn and Facebook profiles using the provided SocialGraph MCP tools.
+
+IMPORTANT RULES:
+- LinkedIn is the primary source of truth. Facebook should agree with LinkedIn.
+- Discrepancies can ONLY be in these fields: name, city, jobs (company, title, seniority, start and end years), education (degree, school, field, graduation year), and skills.
+- Wording differences are NOT discrepancies. Examples: "Bachelor of Science" vs "BSc", "UI/UX Design" vs "UI/UX", "Senior Engineer" for an Engineer role with seniority "senior", or listing fewer skills than the profile.
+- A discrepancy means at least one false claim: inflated job title, shifted employment or graduation years, upgraded degree, fake school or employer, wrong location, or a skill the candidate does not have.
+- Job descriptions, headline, and hometown are NEVER sources of discrepancy.
+- Many candidates share the same name. You MUST verify the right person by using additional information from the CV (location, company, education, skills) to narrow down search results. Do not assume the first search result is the correct person.
+- Use the tools to search and retrieve profiles. Start by searching LinkedIn with the candidate's name and location. If many results, narrow down by company or education. Retrieve the full LinkedIn profile. You may also check Facebook if needed.
+- After careful verification, output a single JSON object with exactly two keys: "score" (float between 0 and 1) and "reason" (string).
+  - Score > 0.5 means the CV is valid (no discrepancy).
+  - Score <= 0.5 means the CV has at least one discrepancy.
+  - If all claims match, give a high score (e.g., 0.9-1.0).
+  - If any discrepancy is found, give a low score (e.g., 0.0-0.2).
+  - If you cannot verify (e.g., cannot find the person), give 0.5.
+- Your final answer MUST be only the JSON object, with no other text.
+"""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "CV text:\n{input}\n\nVerify this CV and output the JSON."),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+
+    agent = create_tool_calling_agent(model, tools, prompt)
+    return AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=False,
+        handle_parsing_errors=True,
+        max_iterations=20,
+        return_intermediate_steps=False,
+    )
+async def _score_one(agent: Any, filename: str, text: str, sem: asyncio.Semaphore) -> tuple[str, float]:
+    """异步处理单个 CV，带并发信号量。"""
+    async with sem:
+        try:
+            result = await agent.ainvoke({"input": text})
+            output = result.get("output", "")
+
+            # 尝试提取 JSON
+            match = re.search(r'\{[^{}]*"score"[^{}]*\}', output, re.DOTALL)
+            if not match:
+                match = re.search(r'\{.*?"score".*?\}', output, re.DOTALL)
+
+            if match:
+                try:
+                    data = json.loads(match.group())
+                    score = float(data["score"])
+                    if 0.0 <= score <= 1.0:
+                        return filename, score
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    pass
+
+            # 回退：从输出中找第一个 0~1 的浮点数
+            nums = re.findall(r'\b(0\.\d+|1\.0|0|1)\b', output)
+            if nums:
+                score = float(nums[0])
+                if 0.0 <= score <= 1.0:
+                    return filename, score
+
+            return filename, 0.5  # 无法解析时给中性分
+
+        except Exception as e:
+            print(f"[ERROR] Failed to score {filename}: {e}")
+            return filename, 0.5
 
 
 async def score_cvs(agent: Any, cvs: dict[str, str]) -> dict[str, float | None]:
@@ -105,16 +173,10 @@ async def score_cvs(agent: Any, cvs: dict[str, str]) -> dict[str, float | None]:
     about 3 CVs in flight (e.g. with ``asyncio.Semaphore(3)``): the MCP server is
     shared by the whole class.
     """
-    ### YOUR CODE HERE
-    _ = agent
-    return {name: None for name in cvs}
-
-
-# Everything below is provided runner/scoring code. No edits are needed.
-
-_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
-
-
+    sem = asyncio.Semaphore(3)
+    tasks = [_score_one(agent, name, text, sem) for name, text in cvs.items()]
+    results = await asyncio.gather(*tasks)
+    return dict(results)
 def parse_score(value: Any) -> float | None:
     """Accept a float/int, or text containing exactly one number, in [0, 1]."""
     if isinstance(value, bool):
