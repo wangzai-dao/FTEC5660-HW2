@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 from langchain_deepseek import ChatDeepSeek
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 
