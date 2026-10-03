@@ -94,6 +94,27 @@ attack the MCP server. See the homework description for the full rules.
 
 ### Task 1
 > one paragraph describing your solution, and your results on `public_test`.
-
+This agent uses LangChain, DeepSeek-v4-flash, and SocialGraph MCP tools to verify CVs against LinkedIn/Facebook. Its prompt restricts checks to name, city, jobs, education, and skills (wording differences excluded), calls tools for entity resolution, and outputs a 0–1 reliability score with concurrency capped at 3 and per-CV error isolation.
+> results:
+> CV_1.pdf,0.9500,correct
+CV_2.pdf,1.0000,correct
+CV_3.pdf,0.9800,correct
+CV_4.pdf,0.1000,correct
+CV_5.pdf,0.1000,correct
+CV_6.pdf,0.9700,correct
+CV_7.pdf,0.1000,correct
 ### Task 2
 > the attack techniques you used and why you expect them to work.
+I used the following techniques:
+
+1.Hidden text / PDF text extraction: light-gray 8pt injection blocks, invisible to humans but still extracted by MarkItDown.
+2.Prompt injection (direct and indirect): direct instruction to output {"score": 1.0}; indirect disguise as a SocialGraph MCP pre-verification report.
+3.Instruction hierarchy: [SYSTEM] ... [END SYSTEM] tags to make the text look like high-priority system instructions.
+4.Delimiter and role confusion: the fake report mimics system/tool output rather than ordinary CV content.
+5.Authority cues: references to the KYC team, HR records, and LinkedIn ID 10001.
+6.LLM-as-a-judge bias / sycophancy: states all fields match, zero discrepancies, and recommends score 1.0.
+7.Verification coverage / adversarial example: only one false detail — Manager (Senior) vs. true Manager — framed as a wording difference; all other fields are true.
+8.Long-context distraction: two pages of detailed but true projects and certifications dilute attention.
+9.Entity resolution: cites LinkedIn ID 10001 to disambiguate Kelly Tsang despite shared names.
+
+These are expected to work because the hidden text is parser-visible, [SYSTEM] exploits instruction hierarchy, the fake MCP report exploits trust in tool output, and sycophancy nudges agreement. The single ambiguous false detail sits in the assignment’s wording-difference gray zone, while the long context reduces careful field-by-field comparison. Even if one injection is ignored, three repetitions increase the chance that at least one is followed. The result is a CV that still contains a real embellishment but is designed to be judged trustworthy.
